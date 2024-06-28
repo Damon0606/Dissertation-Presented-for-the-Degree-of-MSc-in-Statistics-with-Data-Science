@@ -1,0 +1,1543 @@
+---
+title: "MSc_SwDS_Dissertation_PHS_Integrative_Analysis"
+author: "Zukai Li s2505721"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+#——————————————————————————————————————————————————————————————————————————————#
+Import Packages
+```{r}
+library(car)
+library(Metrics)
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(scales)
+library(mgcv)
+library(MASS)
+library(gratia)
+library(ggplot2)
+library(corrplot)
+```
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+5.1 A&E Attendance Load Prediction Model
+#——————————————————————————————————————————————————————————————————————————————#
+
+
+导入整合好的数据并划分训练集(2018-2022)与测试集(2023)
+```{r}
+# Import the integrated data and split into training set (2018-2022) and testing set (2023)
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code/Code")
+df_monthly_load <- read.csv("df_monthly_load.csv")
+
+# Create Fourier terms to capture seasonality
+df_monthly_load <- df_monthly_load %>%
+  mutate(
+    sin_ch = sin(2 * pi * ch / 24),
+    cos_ch = cos(2 * pi * ch / 24)
+  )
+```
+
+
+Sampling: Randomly select one area from each category as a representative sample
+```{r}
+# Set the random seed
+set.seed(10)
+
+# Create an empty dataframe to store selected CAs and their corresponding ca_names
+selected_ca_df <- data.frame(size_type = character(), ca = character(), ca_name = character(), stringsAsFactors = FALSE)
+
+# Iterate through each size_type category and select the corresponding number of CAs
+for (size_type in unique(df_monthly_load$size_type)) {
+  # Select the corresponding number of CAs based on size_type
+  if (size_type == "Small") {
+    selected_ca <- sample(df_monthly_load$ca[df_monthly_load$size_type == size_type], 1)
+  } else if (size_type == "Medium") {
+    selected_ca <- sample(df_monthly_load$ca[df_monthly_load$size_type == size_type], 2)
+  } else if (size_type == "Large") {
+    selected_ca <- sample(df_monthly_load$ca[df_monthly_load$size_type == size_type], 1)
+  }
+
+  # Find the ca_name corresponding to the selected CAs
+  selected_ca_name <- unique(df_monthly_load$ca_name[df_monthly_load$ca == selected_ca])
+
+  # Add size_type, ca, and ca_name to the dataframe
+  selected_ca_df <- rbind(selected_ca_df, data.frame(size_type = size_type, ca = selected_ca, ca_name = selected_ca_name))
+}
+
+# View the results
+print(selected_ca_df)
+```
+
+
+Split Data into Training and Testing Sets
+```{r}
+# Use data from 2018-2022 as the training set
+train_data1 <- df_monthly_load[df_monthly_load$y >= 2018 & df_monthly_load$y <= 2022, ]
+# Filter training data for selected CAs
+filtered_train_data1 <- train_data1 %>% filter(ca %in% selected_ca_df$ca)
+
+# Use data from 2023 as the testing set
+test_data1 <- df_monthly_load[df_monthly_load$y == 2023, ]
+# Filter testing data for selected CAs
+filtered_test_data1 <- test_data1 %>% filter(ca %in% selected_ca_df$ca)
+```
+
+
+
+
+Check for Multicollinearity
+```{r}
+# Subset data to exclude non-numeric columns
+corr_check1 <- subset(df_monthly_load, select = -c(ca, ca_name, hb, hb_name, size_type))
+
+# Calculate the correlation matrix
+cor_matrix1 <- cor(corr_check1)
+
+# Set plotting parameters
+png("correlation_matrix1.png", width = 10, height = 8, units = "in", res = 300)
+
+# Plot the correlation heatmap
+corrplot(cor_matrix1,
+  tl.col = "black", # Set variable names color to black
+  tl.srt = 45, # Rotate variable names 45 degrees
+  title = "Correlation Matrix", # Add English title
+  title.col = "black", # Set title color to black
+  title.position = "top", # Position title at the top
+  mar = c(1, 1, 4, 1), # Adjust margins
+  cex.text = 10, # Set variable name font size to 10 times the original size
+  cex.main = 2
+) # Set title font size to 2 times the original size
+
+dev.off()
+```
+
+
+
+
+EDA: Observe Patterns in Selected CA Data
+```{r}
+# List of target CAs and corresponding time points
+target_ca <- selected_ca_df$ca
+target_timepoints <- data.frame(
+  ca_name = selected_ca_df$ca_name,
+  y = c(2018, 2019, 2021, 2022),
+  m = c(2, 5, 8, 11),
+  size_type = selected_ca_df$size_type
+)
+
+# Filter data for target CAs
+df_filtered <- df_monthly_load %>%
+  filter(ca %in% target_ca)
+
+# Filter data for specified time points
+df_filtered <- df_filtered %>%
+  inner_join(target_timepoints, by = c("ca_name", "y", "m", "size_type"))
+
+# Get all combinations of ca_name, year, and month
+ca_year_month_combinations <- df_filtered %>%
+  group_by(ca_name, y, m, size_type) %>%
+  summarise(.groups = "drop")
+
+# Iterate through each combination and plot the data
+for (i in 1:nrow(ca_year_month_combinations)) {
+  ca_name <- ca_year_month_combinations$ca_name[i]
+  year <- ca_year_month_combinations$y[i]
+  month <- ca_year_month_combinations$m[i]
+  size_type <- ca_year_month_combinations$size_type[i]
+
+  # Filter data for the current combination
+  subset_data <- df_filtered %>% filter(ca_name == ca_name, y == year, m == month)
+
+  # Set theme and font size
+  theme_set(theme_minimal(base_size = 20) +
+    theme(
+      panel.grid.major = element_line(color = "gray95"),
+      panel.grid.minor = element_line(color = "gray95"),
+      panel.background = element_rect(fill = "gray85", color = NA)
+    ))
+
+  # Create the plot
+  p1 <- ggplot(subset_data, aes(x = ch, y = total)) +
+    geom_point(color = "blue", size = 2) +
+    geom_line(linetype = "dashed", linewidth = 0.75) +
+    geom_vline(xintercept = seq(0, max(subset_data$ch), by = 24), linetype = "dashed", linewidth = 1, color = "red") +
+    labs(
+      title = paste("Actual Total Attendances\nCA:", ca_name, "(", size_type, ")", "| Year:", year, "| Month:", month),
+      x = "ch",
+      y = "Number of Attendances"
+    )
+
+  # Print the plot
+  print(p1)
+
+  # Save the plot
+  ggsave(filename = paste0("plots/", ca_name, "_", year, "_", month, ".png"), plot = p1, width = 10, height = 8, dpi = 300)
+}
+```
+
+
+
+
+Full Year Prediction function (uncharted version)
+```{r}
+evaluation_annual1 <- function(train_data, test_data0, model) {
+  test_data <- test_data0
+
+  # Determine model type and perform prediction
+  model_type <- class(model)[1]
+
+  # Perform prediction on the test data
+  test_data$predicted_total <- predict(model, newdata = test_data)
+
+  # Set negative predictions to 0
+  test_data$predicted_total[test_data$predicted_total <= 0] <- 0
+
+  # Calculate metrics on the test data
+  test_mse_value <- mse(test_data$total, test_data$predicted_total)
+  test_rmse_value <- rmse(test_data$total, test_data$predicted_total)
+  test_mae_value <- mae(test_data$total, test_data$predicted_total)
+
+  # Calculate Adjusted R-squared based on model type
+  adj_r_squared <- ifelse(
+    "lm" %in% model_type,
+    summary(model)$adj.r.squared,
+    ifelse(
+      "gam" %in% model_type || "bam" %in% model_type,
+      summary(model)$r.sq,
+      ifelse(
+        "glm" %in% model_type,
+        {
+          glm_r_squared <- 1 - (summary(model)$deviance / summary(model)$null.deviance)
+          1 - ((1 - glm_r_squared) * (nrow(test_data) - 1) / (nrow(test_data) - length(model$coefficients) - 1))
+        },
+        NA
+      )
+    )
+  )
+  aic_value <- AIC(model)
+
+  # Print training metrics
+  training_predictions <- predict(model, newdata = train_data)
+  training_predictions[training_predictions <= 0] <- 0
+
+  training_mse_value <- mse(train_data$total, training_predictions)
+  training_rmse_value <- rmse(train_data$total, training_predictions)
+  training_mae_value <- mae(train_data$total, training_predictions)
+
+  cat("Training Metrics:\n")
+  cat("MSE:", training_mse_value, "\n")
+  cat("RMSE:", training_rmse_value, "\n")
+  cat("MAE:", training_mae_value, "\n")
+  cat("Adjusted R-squared:", adj_r_squared, "\n")
+  cat("AIC:", aic_value, "\n")
+
+  # Print test metrics
+  cat("Test Metrics:\n")
+  cat("MSE:", test_mse_value, "\n")
+  cat("RMSE:", test_rmse_value, "\n")
+  cat("MAE:", test_mae_value, "\n")
+
+  return(list(
+    predicted_data = test_data,
+    train_metrics = list(
+      mse = training_mse_value,
+      rmse = training_rmse_value,
+      mae = training_mae_value,
+      adj_r_squared = adj_r_squared,
+      aic = aic_value
+    ),
+    test_metrics = list(
+      mse = test_mse_value,
+      rmse = test_rmse_value,
+      mae = test_mae_value
+    )
+  ))
+}
+```
+
+
+Full Year Prediction function (charted version)
+```{r}
+evaluation_annual1_plot <- function(train_data, test_data0, model) {
+  test_data <- test_data0
+
+  # Determine model type and perform prediction
+  model_type <- class(model)[1]
+
+  # Perform prediction on the test data
+  test_data$predicted_total <- predict(model, newdata = test_data)
+
+  # Set negative predictions to 0
+  test_data$predicted_total[test_data$predicted_total <= 0] <- 0
+
+  # Calculate metrics on the test data
+  test_mse_value <- mse(test_data$total, test_data$predicted_total)
+  test_rmse_value <- rmse(test_data$total, test_data$predicted_total)
+  test_mae_value <- mae(test_data$total, test_data$predicted_total)
+
+  # Calculate Adjusted R-squared based on model type
+  adj_r_squared <- ifelse(
+    "lm" %in% model_type,
+    summary(model)$adj.r.squared,
+    ifelse(
+      "gam" %in% model_type || "bam" %in% model_type,
+      summary(model)$r.sq,
+      ifelse(
+        "glm" %in% model_type,
+        {
+          glm_r_squared <- 1 - (summary(model)$deviance / summary(model)$null.deviance)
+          1 - ((1 - glm_r_squared) * (nrow(test_data) - 1) / (nrow(test_data) - length(model$coefficients) - 1))
+        },
+        NA
+      )
+    )
+  )
+  aic_value <- AIC(model)
+
+  # Get unique combinations of ca, year, and month
+  ca_year_month_combinations <- test_data %>%
+    group_by(ca, ca_name, y, m) %>%
+    summarise(.groups = "drop")
+
+  # Iterate over each combination and plot separately
+  for (i in 1:nrow(ca_year_month_combinations)) {
+    ca_c <- ca_year_month_combinations$ca[i]
+    year_c <- ca_year_month_combinations$y[i]
+    month_c <- ca_year_month_combinations$m[i]
+
+    # Filter data for current combination
+    subset_data <- test_data %>% filter(ca == ca_c & y == year_c & m == month_c)
+
+    # 创建图表并应用自定义主题
+    p <- ggplot(subset_data, aes(x = ch)) +
+      geom_point(aes(y = total, color = "Actual"), size = 3) +
+      geom_point(aes(y = predicted_total, color = "Predicted"), size = 3) +
+      geom_smooth(aes(y = predicted_total, color = "Predicted"), linewidth = 1, method = "loess", se = FALSE, span = 0.05) +
+      labs(
+        title = paste("Actual vs Predicted Total Attendances\n", subset_data$ca_name[1], year_c, month_c),
+        x = "ch",
+        y = "Total Attendances",
+        color = "Legend"
+      ) +
+      geom_vline(xintercept = seq(0, 167, by = 24), linetype = "dashed", color = "red") +
+      theme(
+        panel.grid.major = element_line(color = "gray95"),
+        panel.grid.minor = element_line(color = "gray95"),
+        panel.background = element_rect(fill = "gray85", color = NA)
+      )
+
+    print(p)
+
+    # 保存图像
+    ggsave(filename = paste0("plots/", "m1_", subset_data$ca_name[1], "_", year_c, "_", month_c, ".png"), plot = p, width = 10, height = 8, dpi = 300)
+  }
+
+  # Print training metrics
+  training_predictions <- predict(model, newdata = train_data)
+  training_predictions[training_predictions <= 0] <- 0
+
+  training_mse_value <- mse(train_data$total, training_predictions)
+  training_rmse_value <- rmse(train_data$total, training_predictions)
+  training_mae_value <- mae(train_data$total, training_predictions)
+
+  cat("Training Metrics:\n")
+  cat("MSE:", training_mse_value, "\n")
+  cat("RMSE:", training_rmse_value, "\n")
+  cat("MAE:", training_mae_value, "\n")
+  cat("Adjusted R-squared:", adj_r_squared, "\n")
+  cat("AIC:", aic_value, "\n")
+
+  # Print test metrics
+  cat("Test Metrics:\n")
+  cat("MSE:", test_mse_value, "\n")
+  cat("RMSE:", test_rmse_value, "\n")
+  cat("MAE:", test_mae_value, "\n")
+
+  return(list(
+    predicted_data = test_data,
+    train_metrics = list(
+      mse = training_mse_value,
+      rmse = training_rmse_value,
+      mae = training_mae_value,
+      adj_r_squared = adj_r_squared,
+      aic = aic_value
+    ),
+    test_metrics = list(
+      mse = test_mse_value,
+      rmse = test_rmse_value,
+      mae = test_mae_value
+    )
+  ))
+}
+```
+
+
+
+
+Sliding Window Prediction function
+```{r}
+evaluation_sliding1 <- function(train_data, test_data, formula, model_type) {
+  # Split test data into 12 subsets by month
+  test_data_list <- split(test_data, test_data$m)
+
+  # Initialize lists to store metrics
+  metrics <- list(
+    mse = numeric(),
+    rmse = numeric(),
+    mae = numeric(),
+    adj_r_squared = numeric(),
+    aic = numeric()
+  )
+
+  # Function to calculate metrics
+  calculate_metrics <- function(actual, predicted, model, data) {
+    mse_value <- mean((actual - predicted)^2)
+    rmse_value <- sqrt(mse_value)
+    mae_value <- mean(abs(actual - predicted))
+    aic_value <- AIC(model)
+
+    if (model_type == "lm") {
+      adj_r_squared <- summary(model)$adj.r.squared
+    } else if (model_type == "gam") {
+      adj_r_squared <- summary(model)$r.sq
+    } else if (model_type == "glm") {
+      glm_r_squared <- 1 - (summary(model)$deviance / summary(model)$null.deviance)
+      adj_r_squared <- 1 - ((1 - glm_r_squared) * (nrow(data) - 1) / (nrow(data) - length(model$coefficients) - 1))
+    } else {
+      adj_r_squared <- NA
+    }
+
+    return(list(mse = mse_value, rmse = rmse_value, mae = mae_value, adj_r_squared = adj_r_squared, aic = aic_value))
+  }
+
+  # Function to train model
+  train_model <- function(model_type, formula, train_data) {
+    if (model_type == "lm") {
+      return(lm(formula, data = train_data))
+    } else if (model_type == "glm") {
+      return(glm(formula, data = train_data, family = gaussian()))
+    } else if (model_type == "gam") {
+      return(gam(formula, data = train_data))
+    } else {
+      stop("Unsupported model type.")
+    }
+  }
+
+  # Iterate over each month in test data
+  for (i in 1:length(test_data_list)) {
+    # Train the model
+    model <- train_model(model_type, formula, train_data)
+
+    # Predict the next month's data
+    next_month_data <- test_data_list[[i]]
+
+    # Ensure all factors have at least two levels in test data subset
+    for (col in colnames(next_month_data)) {
+      if (is.factor(next_month_data[[col]]) && length(unique(next_month_data[[col]])) < 2) {
+        next_month_data[[col]] <- as.character(next_month_data[[col]])
+      }
+    }
+
+    if (model_type == "glm" || model_type == "gam") {
+      predicted <- predict(model, newdata = next_month_data, type = "response")
+    } else {
+      predicted <- predict(model, newdata = next_month_data)
+    }
+
+    # Calculate metrics for the model
+    metrics_curr <- calculate_metrics(next_month_data$total, predicted, model, train_data)
+
+    # Store metrics
+    metrics$mse <- c(metrics$mse, metrics_curr$mse)
+    metrics$rmse <- c(metrics$rmse, metrics_curr$rmse)
+    metrics$mae <- c(metrics$mae, metrics_curr$mae)
+    metrics$adj_r_squared <- c(metrics$adj_r_squared, metrics_curr$adj_r_squared)
+    metrics$aic <- c(metrics$aic, metrics_curr$aic)
+
+    # Add the next month's actual data to the training set
+    train_data <- rbind(train_data, next_month_data)
+  }
+
+  # Calculate average metrics
+  avg_metrics <- list(
+    mse = mean(metrics$mse),
+    rmse = mean(metrics$rmse),
+    mae = mean(metrics$mae),
+    adj_r_squared = mean(metrics$adj_r_squared, na.rm = TRUE),
+    aic = mean(metrics$aic)
+  )
+
+  # Print the metrics
+  print("Average metrics:")
+  print(avg_metrics)
+
+  return(list(metrics = metrics, avg_metrics = avg_metrics))
+}
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+5.1.1 Model Fitting and Selection
+#——————————————————————————————————————————————————————————————————————————————#
+
+
+Model 1.1: Simple Linear Model (baseline model)
+```{r}
+formula_str1.1 <- as.formula("total ~ ca_name + y + m + ch")
+
+# Fit the SLR model
+model1.1 <- lm(formula_str1.1, data = train_data1)
+
+# Use functions for prediction and visualization
+result_annual <- evaluation_annual1(train_data1, test_data1, model1.1)
+result_sliding <- evaluation_sliding1(train_data1, test_data1, formula_str1.1, "lm")
+
+# result_filter <- evaluation_annual1_plot(filtered_train_data1, filtered_test_data1, model1.1)
+```
+
+
+
+
+Model 1.2: Stepwise Linear Regression
+```{r}
+# Define the full model with all potential predictors
+full_model1 <- lm(total ~ . - sin_ch - cos_ch, data = train_data1)
+
+# Define the null model with no predictors
+null_model1 <- lm(total ~ 1, data = train_data1)
+
+# Perform stepwise regression
+model1.2 <- step(null_model1, scope = list(lower = null_model1, upper = full_model1), direction = "both", trace = FALSE)
+
+# Print the selected variables
+print(names(coef(model1.2)))
+```
+
+```{r}
+formula_str1.2 <- as.formula("total ~ ca_name + m + cm + ch + GPs_Count + num.practices + list.size")
+
+# Use functions for prediction and visualization
+result_annual <- evaluation_annual1(train_data1, test_data1, model1.2)
+result_sliding <- evaluation_sliding1(train_data1, test_data1, formula_str1.2, "lm")
+
+# result_filter <- evaluation_annual1_plot(filtered_train_data1, filtered_test_data1, model1.2)
+```
+
+
+
+
+Model 1.3: LR Model with Selected Variables and Fourier Terms
+```{r}
+formula_str1.3 <- as.formula("total ~ ca_name + m + cm + ch + GPs_Count + num.practices + sin_ch + cos_ch")
+
+# Fit the SLR model
+model1.3 <- lm(formula_str1.3, data = train_data1)
+
+# Use functions for prediction and visualization
+result_annual <- evaluation_annual1(train_data1, test_data1, model1.3)
+result_sliding <- evaluation_sliding1(train_data1, test_data1, formula_str1.3, "lm")
+
+# result_filter <- evaluation_annual1_plot(filtered_train_data1, filtered_test_data1, model1.3)
+```
+
+
+
+
+Model 1.4: LR Model with All Variables
+```{r}
+formula_str1.4 <- as.formula("total ~ .")
+
+# Define the full model with all potential predictors
+model1.4 <- lm(formula_str1.4, data = train_data1)
+
+# Use functions for prediction and visualization
+result_annual <- evaluation_annual1(train_data1, test_data1, model1.4)
+result_sliding <- evaluation_sliding1(train_data1, test_data1, formula_str1.4, "lm")
+
+# result_filter <- evaluation_annual1_plot(filtered_train_data1, filtered_test_data1, model1.4)
+```
+
+
+
+
+Model 1.5: GAM with Selected Variables
+```{r}
+formula_str1.5 <- as.formula("total ~ ca_name + s(m, k=5) + s(cm, k=5) + s(ch, k=100) + s(GPs_Count, k=30) + size_type")
+
+# Fit the GAM model
+model1.5 <- gam(formula_str1.5, data = train_data1)
+
+# Use functions for prediction and visualization
+result_annual <- evaluation_annual1(train_data1, test_data1, model1.5)
+result_sliding <- evaluation_sliding1(train_data1, test_data1, formula_str1.5, "gam")
+
+result_filter <- evaluation_annual1_plot(filtered_train_data1, filtered_test_data1, model1.5)
+```
+
+
+
+
+Model 1.6: GAM with All Variables
+```{r}
+formula_str1.6 <- as.formula("total ~ ca_name  + s(y, k=5) + s(m, k=5) + s(cm, k=5) + s(ch, k=100) + size_type +
+    s(GPs_Count, k=5) + s(num.practices, k=5) + s(list.size, k=5)")
+
+# Fit the GAM model
+model1.6 <- gam(formula_str1.6, data = train_data1, select = TRUE)
+
+# Use functions for prediction and visualization
+result_annual <- evaluation_annual1(train_data1, test_data1, model1.6)
+result_sliding <- evaluation_sliding1(train_data1, test_data1, formula_str1.6, "gam")
+
+# result_filter <- evaluation_annual1_plot(filtered_train_data1, filtered_test_data1, model1.6)
+```
+
+
+
+
+This module performs a grid search combined with cross-validation to select the optimal parameters for a Generalized Additive Model (GAM). The module defines a parameter grid, performs cross-validation to evaluate different parameter combinations, and selects the best combination based on the evaluation metric. Finally, it fits the GAM model using the best parameters and evaluates its performance.
+```{r}
+# # Define the parameter grid
+# k_values <- list(m = c(5, 10, 15), cm = c(5, 10, 15), ch = c(14, 15, 20), GPs_Count = c(5, 10, 15))
+# sp_values <- c(0.01, 0.1, 1, 10) # Example penalty parameters
+# bs_values <- c("cr", "tp", "cc")
+#
+# # Define the cross-validation function
+# cross_validate <- function(train_data, k_vals, sp_val, bs_val) {
+#   formula <- as.formula(paste(
+#     'total ~ ca_name + s(m, k=', k_vals$m, ') + s(cm, k=', k_vals$cm, ') + s(ch, k=', k_vals$ch, ', bs="', bs_val, '") + s(GPs_Count, k=', k_vals$GPs_Count, ') + size_type',
+#     sep = ''
+#   ))
+#
+#   # Try to fit the GAM model and catch errors
+#   tryCatch({
+#     model <- gam(formula, data = train_data, sp = sp_val, select = TRUE)
+#
+#     # Cross-validation
+#     set.seed(123)  # Ensure reproducibility
+#     cv_results <- gam.check(model, rep = 10)  # 10-fold cross-validation
+#
+#     # Return cross-validation error (can choose other metrics if needed)
+#     mean(cv_results$edf)  # Use mean squared error as the evaluation metric
+#   }, error = function(e) {
+#     NA  # Return NA if an error occurs during fitting
+#   })
+# }
+#
+# # Search for the best parameter combination
+# best_score <- Inf
+# best_params <- list()
+#
+# for (k_m in k_values$m) {
+#   for (k_cm in k_values$cm) {
+#     for (k_ch in k_values$ch) {
+#       for (k_GPs_Count in k_values$GPs_Count) {
+#         for (sp in sp_values) {
+#           for (bs in bs_values) {
+#             k_vals <- list(m = k_m, cm = k_cm, ch = k_ch, GPs_Count = k_GPs_Count)
+#             score <- cross_validate(train_data1, k_vals, sp, bs)
+#             if (!is.na(score) && score < best_score) {
+#               best_score <- score
+#               best_params <- list(k_vals = k_vals, sp = sp, bs = bs)
+#             }
+#           }
+#         }
+#       }
+#     }
+#   }
+# }
+#
+# # Output the best parameter combination
+# print(best_params)
+#
+# # Fit the final model using the best parameters
+# best_formula <- as.formula(paste(
+#   'total ~ ca_name + s(m, k=', best_params$k_vals$m, ') + s(cm, k=', best_params$k_vals$cm, ') + s(ch, k=', best_params$k_vals$ch, ', bs="', best_params$bs, '") + s(GPs_Count, k=', best_params$k_vals$GPs_Count, ') + size_type',
+#   sep = ''
+# ))
+#
+# model1_gam1 <- gam(best_formula, data = train_data1, sp = best_params$sp, select = TRUE)
+#
+# # Evaluate the optimized model using the evaluation_sliding1 function
+# result_sliding <- evaluation_sliding1(train_data1, test_data1, best_formula, model_type = "gam")
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+5.1.2 Model Checking
+#——————————————————————————————————————————————————————————————————————————————#
+
+
+```{r}
+# 1. Basic diagnostics
+summary(model1.5)
+
+# 2. Residual diagnostics
+# par(mfrow = c(2, 2))
+# plot(model1.5, residuals = TRUE, pch = 16)
+# par(mfrow = c(1, 1))
+
+# 3. Smooth term visualization
+# Using `plot.gam` function
+# plot(model1.5, pages = 1, residuals = TRUE, pch = 16, shade = TRUE)
+
+# Using `draw` function
+draw(model1.5)
+
+# 4. Residuals vs. Fitted values and Q-Q plot
+# Residuals vs. Fitted values plot
+# residuals <- residuals(model1.5)
+# fitted_values <- fitted(model1.5)
+# plot(fitted_values, residuals, xlab = "Fitted Values", ylab = "Residuals", main = "Residuals vs Fitted Values")
+# abline(h = 0, col = "red")
+
+# Q-Q plot
+# qqnorm(residuals)
+# qqline(residuals, col = "red")
+
+# 5. Checking for autocorrelation of residuals
+# acf(residuals, main = "Autocorrelation of Residuals")
+
+# 6. Comprehensive diagnostic assessment using `appraise` function from `gratia` package
+appraise(model1.5)
+```
+
+
+
+
+
+
+
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+A&E Waiting Time Prediction Model
+#——————————————————————————————————————————————————————————————————————————————#
+
+
+
+```{r}
+# Import the integrated data
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code/Code")
+df_waiting_time <- read.csv("df_waiting_time.csv")
+```
+
+
+Samples
+```{r}
+# View the results from before
+print(selected_ca_df)
+```
+
+
+```{r}
+# Assuming selected_ca_df contains the column 'ca' for filtering
+selected_ca <- selected_ca_df$ca
+
+# Use data from 2018-2022 as the training set
+train_data2 <- df_waiting_time[df_waiting_time$y >= 2015 & df_waiting_time$y <= 2022, ]
+# Filter training data
+filtered_train_data2 <- train_data2 %>% filter(ca %in% selected_ca)
+
+# Use data from 2023 as the test set
+test_data2 <- df_waiting_time[df_waiting_time$y == 2023, ]
+# Filter test data
+filtered_test_data2 <- test_data2 %>% filter(ca %in% selected_ca)
+```
+
+
+
+
+Visually explore the distribution of response variables
+```{r}
+# Histogram plot
+ggplot(df_waiting_time, aes(x = pc.lt4)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(x = "pc.lt4", y = "Frequency", title = "Distribution of pc.lt4") +
+  theme_classic()
+
+# Density plot
+ggplot(df_waiting_time, aes(x = pc.lt4)) +
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  labs(x = "pc.lt4", y = "Density", title = "Density Plot of pc.lt4") +
+  theme_classic()
+
+# Boxplot
+ggplot(df_waiting_time, aes(x = "", y = pc.lt4)) +
+  geom_boxplot(fill = "steelblue") +
+  labs(x = "", y = "pc.lt4", title = "Boxplot of pc.lt4") +
+  theme_classic()
+
+
+# Histogram plot
+ggplot(df_waiting_time, aes(x = pc.gt4)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(x = "pc.lt4", y = "Frequency", title = "Distribution of pc.lt4") +
+  theme_classic()
+
+# Density plot
+ggplot(df_waiting_time, aes(x = pc.gt4)) +
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  labs(x = "pc.lt4", y = "Density", title = "Density Plot of pc.lt4") +
+  theme_classic()
+
+# Boxplot
+ggplot(df_waiting_time, aes(x = "", y = pc.gt4)) +
+  geom_boxplot(fill = "steelblue") +
+  labs(x = "", y = "pc.lt4", title = "Boxplot of pc.lt4") +
+  theme_classic()
+```
+
+
+
+
+Check for Multicollinearity
+```{r}
+# Subset data to exclude non-numeric columns
+corr_check2 <- subset(df_waiting_time, select = -c(ca, ca_name, hb, hb_name, size_type))
+
+# Calculate the correlation matrix
+cor_matrix1 <- cor(corr_check2)
+
+# Set plotting parameters
+png("correlation_matrix2.png", width = 10, height = 8, units = "in", res = 300)
+
+# Plot the correlation heatmap
+corrplot(cor_matrix2,
+  tl.col = "black", # Set variable names color to black
+  tl.srt = 45, # Rotate variable names 45 degrees
+  title = "Correlation Matrix", # Add English title
+  title.col = "black", # Set title color to black
+  title.position = "top", # Position title at the top
+  mar = c(1, 1, 4, 1), # Adjust margins
+  cex.text = 10, # Set variable name font size to 10 times the original size
+  cex.main = 2
+) # Set title font size to 2 times the original size
+
+dev.off()
+```
+
+
+
+Visualizes the filtered data to analyze trends related to total attendances 
+and the percentage of A&E attendances with a waiting time of less than 4 hours over cumulative weeks
+```{r}
+# Filter rows in df_waiting_time data frame
+filtered_df <- df_waiting_time %>% filter(ca %in% target_ca)
+
+# Set global theme and font size
+theme_set(theme_minimal(base_size = 25) +
+          theme(panel.grid.major = element_line(color = "gray95"),
+                panel.grid.minor = element_line(color = "gray95"),
+                panel.background = element_rect(fill = "gray85", color = NA)))
+
+# Create the first plot
+ggplot(filtered_df, aes(x = julian, y = total.a, color = ca_name)) +
+  geom_point(size = 0.5) +
+  geom_line(linewidth = 0.75) +
+  geom_vline(xintercept = seq(0, max(filtered_df$julian), by = 7*52), linetype = "dashed", linewidth = 1, color = "red") +
+  labs(title = "Total Attendances by Cumulative Week",
+       x = "cm",
+       y = "Total Attendances",
+       color = "CA Name") +
+  theme_minimal()
+
+# Create the second plot
+p2 <- ggplot(filtered_df, aes(x = julian, y = pc.lt4, color = ca_name)) +
+  geom_point(size = 1.5) +
+  geom_line(linewidth = 0.75) +
+  geom_vline(xintercept = seq(0, max(filtered_df$julian), by = 7*52),
+             linetype = "dashed", linewidth = 1, color = "red") +
+  annotate("text", x = seq(0, max(filtered_df$julian) - 7*26, by = 7*52) + 7*26,
+           y = max(filtered_df$pc.lt4) * 1.05, label = paste0(2015:2023),
+           color = "black", size = 10) +  # Adjust font size
+  labs(title = "Percentage of A&E attendances with a waiting time of less than 4h by Cumulative Week",
+       x = "cm",
+       y = "pc.lt4",
+       color = "CA Name")
+
+print(p2)
+
+# Save the plot
+ggsave(filename = "pc_lt4.png", plot = p2, width = 20, height = 10, dpi = 300)
+```
+
+
+
+
+Full Year Prediction function (uncharted version)
+```{r}
+evaluation_annual2 <- function(train_data, test_data0, model) {
+  test_data <- test_data0
+
+  # Determine model type and perform prediction
+  model_type <- class(model)[1]
+
+  # Perform prediction on the test data
+  if ("lm" %in% model_type) {
+    test_data$predicted_pc_lt4 <- predict(model, newdata = test_data)
+  } else if ("glm" %in% model_type) {
+    test_data$predicted_pc_lt4 <- predict(model, newdata = test_data, type = "response")
+  } else if ("gam" %in% model_type || "bam" %in% model_type) {
+    test_data$predicted_pc_lt4 <- predict(model, newdata = test_data, type = "response")
+  } else {
+    stop("Unsupported model type.")
+  }
+
+  # Set negative predictions to 0
+  test_data$predicted_pc_lt4[test_data$predicted_pc_lt4 <= 0] <- 0
+
+  # Calculate metrics on the test data
+  test_mse_value <- mse(test_data$pc.lt4, test_data$predicted_pc_lt4)
+  test_rmse_value <- rmse(test_data$pc.lt4, test_data$predicted_pc_lt4)
+  test_mae_value <- mae(test_data$pc.lt4, test_data$predicted_pc_lt4)
+
+  # Calculate Adjusted R-squared based on model type
+  adj_r_squared <- ifelse(
+    "lm" %in% model_type,
+    summary(model)$adj.r.squared,
+    ifelse(
+      "gam" %in% model_type || "bam" %in% model_type,
+      summary(model)$r.sq,
+      ifelse(
+        "glm" %in% model_type,
+        {
+          glm_r_squared <- 1 - (summary(model)$deviance / summary(model)$null.deviance)
+          1 - ((1 - glm_r_squared) * (nrow(test_data) - 1) / (nrow(test_data) - length(model$coefficients) - 1))
+        },
+        NA
+      )
+    )
+  )
+  aic_value <- AIC(model)
+
+  # Perform prediction on the test data
+  if ("lm" %in% model_type) {
+    training_predictions <- predict(model, newdata = train_data)
+  } else if ("glm" %in% model_type) {
+    training_predictions <- predict(model, newdata = train_data, type = "response")
+  } else if ("gam" %in% model_type || "bam" %in% model_type) {
+    training_predictions <- predict(model, newdata = train_data, type = "response")
+  } else {
+    stop("Unsupported model type.")
+  }
+
+  # Print training metrics
+  training_mse_value <- mse(train_data$pc.lt4, training_predictions)
+  training_rmse_value <- rmse(train_data$pc.lt4, training_predictions)
+  training_mae_value <- mae(train_data$pc.lt4, training_predictions)
+
+  cat("Training Metrics:\n")
+  cat("MSE:", training_mse_value, "\n")
+  cat("RMSE:", training_rmse_value, "\n")
+  cat("MAE:", training_mae_value, "\n")
+  cat("Adjusted R-squared:", adj_r_squared, "\n")
+  cat("AIC:", aic_value, "\n")
+
+  # Print test metrics
+  cat("Test Metrics:\n")
+  cat("MSE:", test_mse_value, "\n")
+  cat("RMSE:", test_rmse_value, "\n")
+  cat("MAE:", test_mae_value, "\n")
+
+  return(list(
+    predicted_data = test_data,
+    train_metrics = list(
+      mse = training_mse_value,
+      rmse = training_rmse_value,
+      mae = training_mae_value,
+      adj_r_squared = adj_r_squared,
+      aic = aic_value
+    ),
+    test_metrics = list(
+      mse = test_mse_value,
+      rmse = test_rmse_value,
+      mae = test_mae_value
+    )
+  ))
+}
+```
+
+
+Full Year Prediction function (charted version)
+```{r}
+evaluation_annual2_plot <- function(train_data, test_data0, model) {
+  test_data <- test_data0
+
+  # Determine model type and perform prediction
+  model_type <- class(model)[1]
+
+  # Perform prediction on the test data
+  if ("lm" %in% model_type) {
+    test_data$predicted_pc_lt4 <- predict(model, newdata = test_data)
+  } else if ("glm" %in% model_type) {
+    test_data$predicted_pc_lt4 <- predict(model, newdata = test_data, type = "response")
+  } else if ("gam" %in% model_type || "bam" %in% model_type) {
+    test_data$predicted_pc_lt4 <- predict(model, newdata = test_data, type = "response")
+  } else {
+    stop("Unsupported model type.")
+  }
+
+  # Set negative predictions to 0
+  test_data$predicted_pc_lt4[test_data$predicted_pc_lt4 <= 0] <- 0
+
+  # Get all unique ca_name
+  unique_canames <- unique(test_data$ca_name)
+
+  # Calculate metrics on the test data
+  test_mse_value <- mse(test_data$pc.lt4, test_data$predicted_pc_lt4)
+  test_rmse_value <- rmse(test_data$pc.lt4, test_data$predicted_pc_lt4)
+  test_mae_value <- mae(test_data$pc.lt4, test_data$predicted_pc_lt4)
+
+  # Calculate Adjusted R-squared based on model type
+  adj_r_squared <- ifelse(
+    "lm" %in% model_type,
+    summary(model)$adj.r.squared,
+    ifelse(
+      "gam" %in% model_type || "bam" %in% model_type,
+      summary(model)$r.sq,
+      ifelse(
+        "glm" %in% model_type,
+        {
+          glm_r_squared <- 1 - (summary(model)$deviance / summary(model)$null.deviance)
+          1 - ((1 - glm_r_squared) * (nrow(test_data) - 1) / (nrow(test_data) - length(model$coefficients) - 1))
+        },
+        NA
+      )
+    )
+  )
+  aic_value <- AIC(model)
+  vif_value <- ifelse("lm" %in% model_type, vif(model), NA)
+
+  # Print training metrics
+  training_predictions <- predict(model, newdata = train_data)
+  training_predictions[training_predictions <= 0] <- 0
+
+  training_mse_value <- mse(train_data$pc.lt4, training_predictions)
+  training_rmse_value <- rmse(train_data$pc.lt4, training_predictions)
+  training_mae_value <- mae(train_data$pc.lt4, training_predictions)
+
+  cat("Training Metrics:\n")
+  cat("MSE:", training_mse_value, "\n")
+  cat("RMSE:", training_rmse_value, "\n")
+  cat("MAE:", training_mae_value, "\n")
+  cat("Adjusted R-squared:", adj_r_squared, "\n")
+  cat("AIC:", aic_value, "\n")
+
+  # Print test metrics
+  cat("Test Metrics:\n")
+  cat("MSE:", test_mse_value, "\n")
+  cat("RMSE:", test_rmse_value, "\n")
+  cat("MAE:", test_mae_value, "\n")
+
+  # Iterate over each ca_name and create plots
+  for (ca_name_c in unique_canames) {
+    # Filter data for current ca_name
+    subset_data <- test_data %>% filter(ca_name == ca_name_c)
+
+    theme_set(theme_minimal(base_size = 15) +
+      theme(
+        panel.grid.major = element_line(color = "gray95"),
+        panel.grid.minor = element_line(color = "gray95"),
+        panel.background = element_rect(fill = "gray85", color = NA)
+      ))
+
+    # Create and store plot
+    p <- ggplot(subset_data, aes(x = julian)) +
+      geom_point(aes(y = pc.lt4, color = "Actual"), size = 4) +
+      geom_point(aes(y = predicted_pc_lt4, color = "Predicted"), size = 4) +
+      geom_smooth(aes(y = predicted_pc_lt4, color = "Predicted"), method = "loess", se = FALSE, span = 0.15) +
+      labs(
+        title = paste("Actual vs Predicted pc.lt4 -", ca_name_c),
+        x = "julian",
+        y = "pc.lt4",
+        color = "Legend"
+      )
+
+    print(p)
+
+    # Save the image
+    ggsave(filename = paste0("plots/", "m2_", ca_name_c, ".png"), plot = p, width = 10, height = 8, dpi = 300)
+  }
+
+  return(list(
+    predicted_data = test_data,
+    train_metrics = list(
+      mse = training_mse_value,
+      rmse = training_rmse_value,
+      mae = training_mae_value,
+      adj_r_squared = adj_r_squared,
+      aic = aic_value
+    ),
+    test_metrics = list(
+      mse = test_mse_value,
+      rmse = test_rmse_value,
+      mae = test_mae_value
+    )
+  ))
+}
+```
+
+
+
+
+Sliding Window Prediction function
+```{r}
+# Evaluation functions
+evaluation_sliding2 <- function(train_data, test_data, formula, model_type) {
+  # Split test data into 12 subsets by month
+  test_data_list <- split(test_data, test_data$m)
+
+  # Initialize lists to store metrics
+  metrics <- list(
+    mse = numeric(),
+    rmse = numeric(),
+    mae = numeric(),
+    adj_r_squared = numeric(),
+    aic = numeric()
+  )
+
+  # Function to calculate metrics
+  calculate_metrics <- function(actual, predicted, model, data) {
+    mse_value <- mean((actual - predicted)^2)
+    rmse_value <- sqrt(mse_value)
+    mae_value <- mean(abs(actual - predicted))
+    aic_value <- AIC(model)
+
+    if (model_type == "lm") {
+      adj_r_squared <- summary(model)$adj.r.squared
+    } else if (model_type == "gam") {
+      adj_r_squared <- summary(model)$r.sq
+    } else if (model_type == "glm") {
+      glm_r_squared <- 1 - (summary(model)$deviance / summary(model)$null.deviance)
+      adj_r_squared <- 1 - ((1 - glm_r_squared) * (nrow(data) - 1) / (nrow(data) - length(model$coefficients) - 1))
+    } else {
+      adj_r_squared <- NA
+    }
+
+    return(list(mse = mse_value, rmse = rmse_value, mae = mae_value, adj_r_squared = adj_r_squared, aic = aic_value))
+  }
+
+  # Function to train model
+  train_model <- function(model_type, formula, train_data) {
+    if (model_type == "lm") {
+      return(lm(formula, data = train_data))
+    } else if (model_type == "glm") {
+      return(glm(formula, data = train_data, family = binomial()))
+    } else if (model_type == "gam") {
+      return(gam(formula, data = train_data, family = binomial()))
+    } else {
+      stop("Unsupported model type.")
+    }
+  }
+
+  all_actual <- list()
+  all_predicted <- list()
+  all_julian <- list()
+  all_ca_name <- list()
+  all_month <- list()
+
+  # Iterate over each month in test data
+  for (i in 1:length(test_data_list)) {
+    # Train the model
+    model <- train_model(model_type, formula, train_data)
+
+    # Predict the next month's data
+    next_month_data <- test_data_list[[i]]
+
+    # Ensure all factors have at least two levels in test data subset
+    for (col in colnames(next_month_data)) {
+      if (is.factor(next_month_data[[col]]) && length(unique(next_month_data[[col]])) < 2) {
+        next_month_data[[col]] <- as.character(next_month_data[[col]])
+      }
+    }
+
+    if (model_type == "glm" || model_type == "gam") {
+      predicted <- predict(model, newdata = next_month_data, type = "response")
+    } else {
+      predicted <- predict(model, newdata = next_month_data)
+    }
+
+    # Calculate metrics for the model
+    metrics_curr <- calculate_metrics(next_month_data$pc.lt4, predicted, model, train_data)
+
+    # Store metrics
+    metrics$mse <- c(metrics$mse, metrics_curr$mse)
+    metrics$rmse <- c(metrics$rmse, metrics_curr$rmse)
+    metrics$mae <- c(metrics$mae, metrics_curr$mae)
+    metrics$adj_r_squared <- c(metrics$adj_r_squared, metrics_curr$adj_r_squared)
+    metrics$aic <- c(metrics$aic, metrics_curr$aic)
+
+    # Store all actual and predicted values for plotting
+    all_actual[[i]] <- next_month_data$pc.lt4
+    all_predicted[[i]] <- predicted
+    all_julian[[i]] <- next_month_data$julian
+    all_ca_name[[i]] <- next_month_data$ca_name
+    all_month[[i]] <- next_month_data$m
+
+    # Add the next month's actual data to the training set
+    train_data <- rbind(train_data, next_month_data)
+  }
+
+  # Calculate average metrics
+  avg_metrics <- list(
+    mse = mean(metrics$mse),
+    rmse = mean(metrics$rmse),
+    mae = mean(metrics$mae),
+    adj_r_squared = mean(metrics$adj_r_squared, na.rm = TRUE),
+    aic = mean(metrics$aic)
+  )
+
+  # Print the metrics
+  print("Average metrics:")
+  print(avg_metrics)
+
+  return(list(metrics = metrics, avg_metrics = avg_metrics))
+}
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+5.2.1 Model Fitting and Selection
+#——————————————————————————————————————————————————————————————————————————————#
+
+
+
+
+Model 2.1: Simple Linear Model (baseline model)
+```{r}
+formula_str2.1 <- as.formula("pc.lt4 ~ ca_name + m + julian")
+
+model2.1 <- lm(formula_str2.1, data = train_data2)
+
+result_annual <- evaluation_annual2(train_data2, test_data2, model2.1)
+result_sliding <- evaluation_sliding2(train_data2, test_data2, formula_str2.1, "lm")
+
+# result_filter <- evaluation_annual2_plot(filtered_train_data2, filtered_test_data2, model2.1)
+```
+
+
+
+
+Model 2.2: Stepwise Linear Regression Model
+```{r}
+# Define the full model with all potential predictors
+full_model2 <- lm(pc.lt4 ~ . - lt4 - gt4 - pc.gt4 - total.a, data = train_data2)
+
+# Define the null model with no predictors
+null_model2 <- lm(pc.lt4 ~ 1, data = train_data2)
+
+# Perform stepwise regression
+model2.2 <- step(null_model2, scope = list(lower = null_model2, upper = full_model2), direction = "both", trace = FALSE)
+
+# Print the selected variables
+print(names(coef(model2.2)))
+```
+
+```{r}
+formula_str2.2 <- as.formula("pc.lt4 ~ ca_name + y + m + GPs_Count + num.practices + list.size")
+
+result_annual <- evaluation_annual2(train_data2, test_data2, model2.2)
+result_sliding <- evaluation_sliding2(train_data2, test_data2, formula_str2.2, "glm")
+
+# result_filter <- evaluation_annual2_plot(filtered_train_data2, filtered_test_data2, model2.2)
+```
+
+
+
+
+Model 2.3: GLM with a Binomial Family and Selected Variables
+```{r}
+formula_str2.3 <- as.formula("cbind(lt4, gt4) ~ ca_name + y + m + julian + GPs_Count")
+
+model2.3 <- glm(formula_str2.3, data = train_data2, family = binomial)
+
+result_annual <- evaluation_annual2(train_data2, test_data2, model2.3)
+result_sliding <- evaluation_sliding2(train_data2, test_data2, formula_str2.3, "glm")
+
+# result_filter <- evaluation_annual2_plot(filtered_train_data2, filtered_test_data2, model2.3)
+```
+
+
+
+
+Model 2.4: GLM with a Binomial Family and All Variables
+```{r}
+formula_str2.4 <- as.formula("cbind(lt4, gt4) ~ ca_name + y + m + julian + size_type + GPs_Count + num.practices + list.size")
+
+model2.4 <- glm(formula_str2.4, data = train_data2, family = binomial)
+
+result_annual <- evaluation_annual2(train_data2, test_data2, model2.4)
+result_sliding <- evaluation_sliding2(train_data2, test_data2, formula_str2.4, "glm")
+
+# result_filter <- evaluation_annual2_plot(filtered_train_data2, filtered_test_data2, model2.4)
+```
+
+
+
+
+Model 2.5: GAM with a Binomial Family and Selected Variables
+```{r}
+formula_str2.5 <- as.formula('cbind(lt4, gt4) ~ ca_name + s(y, bs = "re") + s(m, bs = "cc") + s(GPs_Count)')
+
+model2.5 <- gam(formula_str2.5, data = train_data2, family = binomial)
+
+result_annual <- evaluation_annual2(train_data2, test_data2, model2.5)
+result_sliding <- evaluation_sliding2(train_data2, test_data2, formula_str2.5, "gam")
+
+result_filter <- evaluation_annual2_plot(filtered_train_data2, filtered_test_data2, model2.5)
+```
+
+
+
+
+Model 2.6: GAM with a Binomial Family and All Variables
+```{r}
+formula_str2.6 <- as.formula('cbind(lt4, gt4) ~ ca_name + s(y, bs = "re") + s(m, bs = "cc") + s(julian, k=100) + size_type + s(GPs_Count, k=30) + s(num.practices) + s(list.size)')
+
+model2.6 <- gam(formula_str2.6, data = train_data2, family = binomial)
+
+result_annual <- evaluation_annual2(train_data2, test_data2, model2.6)
+result_sliding <- evaluation_sliding2(train_data2, test_data2, formula_str2.6, "gam")
+
+# result_filter <- evaluation_annual2_plot(filtered_train_data2, filtered_test_data2, model2.6)
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+5.2.2 Model Checking and Evaluation
+#——————————————————————————————————————————————————————————————————————————————#
+
+
+```{r, fig.width=12, fig.height=8, out.width="50%", out.height="50%", fig.show='hold'}
+# 1. Basic diagnostics
+summary(model2.5)
+
+# 2. Residual diagnostics
+# par(mfrow = c(2, 2))
+# plot(model1.5, residuals = TRUE, pch = 16)
+# par(mfrow = c(1, 1))
+
+# 3. Smooth term visualization
+# Using `plot.gam` function
+# plot(model1.5, pages = 1, residuals = TRUE, pch = 16, shade = TRUE)
+
+# Using `draw` function
+draw(model2.5)
+
+# 4. Residuals vs. Fitted values and Q-Q plot
+# Residuals vs. Fitted values plot
+# residuals <- residuals(model1.5)
+# fitted_values <- fitted(model1.5)
+# plot(fitted_values, residuals, xlab = "Fitted Values", ylab = "Residuals", main = "Residuals vs Fitted Values")
+# abline(h = 0, col = "red")
+
+# Q-Q plot
+# qqnorm(residuals)
+# qqline(residuals, col = "red")
+
+# 5. Checking for autocorrelation of residuals
+# acf(residuals, main = "Autocorrelation of Residuals")
+
+# 6. Comprehensive diagnostic assessment using `appraise` function from `gratia` package
+appraise(model2.5)
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+6 Future Projections and Conclusions
+#——————————————————————————————————————————————————————————————————————————————#
+
+
+```{r}
+library(dbplyr)
+
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code/Code")
+
+df_monthly_load_predict <- read.csv("df_monthly_load_predict.csv")
+df_waiting_time_predict <- read.csv("df_waiting_time_predict.csv")
+
+# Divide df_monthly_load_predict dataset
+train_idx <- which(df_monthly_load_predict$y < 2024)
+train_data_1 <- df_monthly_load_predict[train_idx, ]
+test_data_1 <- df_monthly_load_predict[-train_idx, ]
+filtered_train_data_1 <- train_data_1 %>% filter(ca %in% selected_ca_df$ca)
+filtered_test_data_1 <- test_data_1 %>% filter(ca %in% selected_ca_df$ca)
+
+# Divide df_waiting_time_predict dataset
+train_idx <- which(df_waiting_time_predict$date <= "2024-06-09")
+train_data_2 <- df_waiting_time_predict[train_idx, ]
+test_data_2 <- df_waiting_time_predict[-train_idx, ]
+filtered_train_data_2 <- train_data_2 %>% filter(ca %in% selected_ca_df$ca)
+filtered_test_data_2 <- test_data_2 %>% filter(ca %in% selected_ca_df$ca)
+```
+
+
+
+
+A&E Attendance Load Prediction Model
+```{r}
+formula_str1.5 <- as.formula("total ~ ca_name + s(m, k=5) + s(cm, k=5) + s(ch, k=100) + s(GPs_Count, k=30) + size_type")
+model1.5 <- gam(formula_str1.5, data = train_data_1)
+
+pred_1.5 <- predict(model1.5, newdata = test_data_1)
+pred_1.5 <- pmax(pred_1.5, 0)
+```
+
+
+```{r}
+# Update test_data_1 with predicted total values
+test_data_1$total <- pred_1.5
+
+# Combine train_data_1 and updated test_data_1 into predict_2024_1
+predict_2024_1 <- bind_rows(train_data_1, test_data_1)
+
+# Group by ca, ca_name, hb, hb_name, and y to summarize total values
+grouped_totals <- predict_2024_1 %>%
+  group_by(ca, ca_name, hb, hb_name, y) %>%
+  summarize(total = sum(total, na.rm = TRUE))
+
+# Print the grouped totals
+print(grouped_totals)
+```
+
+
+```{r}
+# Compute the average total for years 2018-2023
+avg_2018_2023 <- grouped_totals %>%
+  filter(y >= 2018 & y <= 2023) %>%
+  group_by(ca_name) %>%
+  summarize(avg_total = mean(total, na.rm = TRUE))
+
+# Find rows where 2024 total values exceed the average of 2018-2023
+rows_above_avg <- grouped_totals %>%
+  left_join(avg_2018_2023, by = "ca_name") %>%
+  filter(y == 2024 & total > avg_total)
+
+# Print rows where 2024 total values exceed the average of 2018-2023
+print(rows_above_avg)
+
+# Filter grouped_totals to retain rows where ca_name matches rows_above_avg
+filtered_data1 <- grouped_totals %>%
+  filter(ca_name %in% rows_above_avg$ca_name)
+
+# Print filtered data matching the criteria
+print(filtered_data1)
+
+# Plot a line graph showing total vs year for each ca_name
+theme_set(theme_minimal(base_size = 25) +
+  theme(
+    panel.grid.major = element_line(color = "gray95"),
+    panel.grid.minor = element_line(color = "gray95"),
+    panel.background = element_rect(fill = "gray85", color = NA)
+  ))
+
+pp <- ggplot(filtered_data1, aes(x = y, y = total, group = ca_name, color = ca_name)) +
+  geom_line(linewidth = 1.5) +
+  labs(
+    title = "Total vs Year by ca_name",
+    x = "Year",
+    y = "Total"
+  )
+
+print(pp)
+
+# Save the plot as an image file
+ggsave(filename = paste0("Total_vs_Year.png"), plot = pp, width = 14, height = 8, dpi = 300)
+```
+
+
+
+
+
+Waiting Time Prediction Model
+```{r}
+# Define the corrected formula for the GAM model
+formula_str2.5 <- as.formula('cbind(lt4, gt4) ~ ca_name + s(y, bs = "re") + s(m, bs = "cc") + s(GPs_Count)')
+
+# Fit the GAM model using the corrected formula and binomial family
+model2.5 <- gam(formula_str2.5, data = train_data_2, family = binomial)
+
+# Predict probabilities for pc.lt4 using the fitted model
+pred_2.5 <- predict(model2.5, newdata = test_data_2)
+
+# Ensure predicted probabilities are within valid range [0, 1]
+pred_2.5 <- pmax(pred_2.5, 0)
+pred_2.5 <- pmin(pred_2.5, 1)
+```
+
+
+```{r}
+# Update test_data_2 with predicted pc.lt4 values
+test_data_2$pc.lt4 <- pred_2.5
+
+# Combine train_data_2 and updated test_data_2 into predict_2024_2
+predict_2024_2 <- bind_rows(train_data_2, test_data_2)
+
+# Group by "ca", "ca_name", "hb", "hb_name", and "y" to calculate mean pc.lt4
+grouped_pc.lt4_mean <- predict_2024_2 %>%
+  group_by(ca, ca_name, hb, hb_name, y) %>%
+  summarize(pc.lt4 = mean(pc.lt4, na.rm = TRUE))
+
+# Print the summarized mean pc.lt4 values
+print(grouped_pc.lt4_mean)
+```
+
+
+```{r}
+# Set theme and base font size for plots
+theme_set(theme_minimal(base_size = 25) +
+  theme(
+    panel.grid.major = element_line(color = "gray95"),
+    panel.grid.minor = element_line(color = "gray95"),
+    panel.background = element_rect(fill = "gray85", color = NA)
+  ))
+
+# Filter data to retain ca_names where pc.lt4 in 2024 is less than 0.6
+filtered_data2 <- grouped_pc.lt4_mean %>%
+  filter(y == 2024 & (pc.lt4 < 0.6))
+
+# Filter grouped_pc.lt4_mean to retain rows matching filtered_data2's ca_names
+filtered_grouped <- grouped_pc.lt4_mean %>%
+  filter(ca_name %in% filtered_data2$ca_name)
+
+# Plot lines showing pc.lt4 variation over years for filtered ca_names
+pp <- ggplot(filtered_grouped, aes(x = y, y = pc.lt4, group = ca_name, color = ca_name)) +
+  geom_line(linewidth = 1.5) +
+  labs(
+    title = "pc.lt4 vs Year by ca_name",
+    x = "Year",
+    y = "pc.lt4"
+  ) +
+  theme(legend.position = "top")  # Place legend at the top
+
+# Save the plot as an image file (optional)
+ggsave(filename = paste0("pc_lt4_vs_Year.png"), plot = pp, width = 14, height = 8, dpi = 300)
+
+# Print the plot
+print(pp)
+```
+
+
+```{r}
+unique(filtered_data1$ca_name)
+```
+```{r}
+unique(filtered_data2$ca_name)
+```

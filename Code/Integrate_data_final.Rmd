@@ -1,0 +1,972 @@
+---
+title: "MSc_SwDS_Dissertation_PHS_Integrate_Data"
+author: "Zukai Li s2505721"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+#——————————————————————————————————————————————————————————————————————————————#
+Import Packages
+```{r}
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(ggplot2)
+library(corrplot)
+library(Amelia)
+library(scales)
+library(mgcv)
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Data Preprocessing
+#——————————————————————————————————————————————————————————————————————————————#
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Data 4: Geography Codes and Labels
+Data 5: Current NHS Hospitals in Scotland
+This code is designed to process and merge data about NHS hospitals in Scotland with corresponding geography codes and labels. 
+The resulting dataset includes hospital codes, council area codes and names, and health board codes and names.
+```{r}
+# Set working directory to the specified path
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code")
+
+# Load the hospital data from CSV and select specific columns
+df_hospital <- read.csv("Current_NHS_Hospitals_in_Scotland.csv")[, c("HospitalCode", "CouncilArea", "HealthBoard")]
+# Rename columns for consistency
+colnames(df_hospital) <- c("hosp_code", "ca", "hb")
+
+# Load the geography codes and labels data from CSV and select specific columns
+df_codes <- read.csv("dz2011_codes_and_labels_21042020.csv")[, c("CA", "CAName", "HB", "HBName")]
+# Remove duplicate rows from the geography codes and labels dataset
+df_codes <- df_codes %>%
+  distinct()
+# Rename columns for consistency
+colnames(df_codes) <- c("ca", "ca_name", "hb", "hb_name")
+
+# Merge the hospital data with the geography codes and labels data
+df_hosp.ca <- df_hospital %>%
+  left_join(df_codes, by = c("ca", "hb"))
+
+# Display the first few rows of the merged dataset
+head(df_hosp.ca)
+# Optionally, visualize missing data (uncomment if required)
+# missmap(df_hosp.ca)
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Data 7: Practice list sizes by local authority and age
+This code processes and visualizes data regarding the practice list sizes by local authority and age, 
+calculating the average list size for each local authority, and classifying them based on these averages.
+```{r}
+# Set working directory to the specified path
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code")
+
+# Load the practice list sizes data from CSV
+data7 <- read.csv("Practice_list_sizes_by_local_authority_and_age.csv")
+
+# Select relevant columns for further processing
+list.sizes_ca <- data7 %>%
+  select(ca_name, y, num.practices, list.size)
+
+# Calculate the average list size for each local authority (ca_name) across all years
+df_avg_count <- list.sizes_ca %>%
+  group_by(ca_name) %>%
+  summarize(avg_count = mean(list.size, na.rm = TRUE))
+
+# Set the theme and font size for the plots
+theme_set(theme_minimal(base_size = 20) +
+  theme(
+    panel.grid.major = element_line(color = "gray95"), # Set major grid line color
+    panel.grid.minor = element_line(color = "gray95"), # Set minor grid line color
+    panel.background = element_rect(fill = "gray85", color = NA)
+  )) # Set coordinate area background color
+
+# Visualize the distribution of the average list sizes
+ggplot(df_avg_count, aes(x = avg_count)) +
+  geom_histogram(binwidth = 13500, fill = "blue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribution of the Mean of Practice List Sizes",
+    x = "Mean of Practice List Sizes",
+    y = "Frequency"
+  ) +
+  scale_x_continuous(breaks = seq(0, max(df_avg_count$avg_count, na.rm = TRUE), by = 100000)) +
+  geom_vline(xintercept = 85000, color = "red", linetype = "dashed", size = 1) +
+  geom_vline(xintercept = 200000, color = "red", linetype = "dashed", size = 1)
+# ggsave("distribution_plot.png", width = 10, height = 8, dpi = 300)
+
+# Calculate and visualize the CDF (Cumulative Distribution Function)
+ggplot(df_avg_count, aes(x = avg_count)) +
+  stat_ecdf(geom = "step", size = 1.25) + # Adjust the line width for the CDF plot
+  labs(
+    title = "CDF of the Mean of Practice List Sizes",
+    x = "Mean of Practice List Sizes",
+    y = "CDF"
+  ) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  geom_vline(xintercept = 85000, color = "red", linetype = "dashed", size = 1) +
+  geom_vline(xintercept = 200000, color = "red", linetype = "dashed", size = 1)
+# ggsave("cdf_plot.png", width = 10, height = 8, dpi = 300)
+
+# Classify local authorities based on the average list size
+ca_classed <- df_avg_count %>%
+  mutate(CAType = case_when(
+    avg_count < 85000 ~ "Small",
+    avg_count >= 85000 & avg_count <= 200000 ~ "Medium",
+    avg_count > 200000 ~ "Large"
+  ))
+
+# Rename columns for consistency
+colnames(ca_classed) <- c("ca_name", "size", "size_type")
+
+# Merge the classified data with geography codes and labels
+ca_classed <- ca_classed %>%
+  left_join(df_codes, by = c("ca_name")) %>%
+  select(-ca)
+
+# Display the first few rows of the final dataset
+head(ca_classed)
+# Optionally, visualize missing data (uncomment if required)
+# missmap(ca_classed)
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Data 6: General Practitioner Headcount
+This code processes data regarding General Practitioner (GP) headcounts, extracting relevant rows, 
+transforming the data format, and preparing it for analysis.
+```{r}
+# Set working directory to the specified path
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code")
+
+# Load the GP headcount data from CSV
+data6 <- read.csv("data6.csv")
+
+# Extract rows where Designation is "All GPs" and Gender is "All"
+df_GPnum <- data6 %>%
+  filter(Designation == "All GPs" & Gender == "All") %>%
+  # Transform the data from wide to long format
+  pivot_longer(
+    cols = starts_with("X"),
+    names_to = "Year",
+    values_to = "Count"
+  ) %>%
+  # Remove "X" prefix from Year column and convert it to numeric
+  mutate(Year = as.numeric(gsub("X", "", Year))) %>%
+  # Sort the data by Year and Local Authority
+  arrange(Year, Local.Authority) %>%
+  # Rename columns for consistency
+  rename(ca_name = Local.Authority, y = Year, GPs_Count = Count) %>%
+  # Remove rows where ca_name is "Scotland"
+  filter(ca_name != "Scotland") %>%
+  # Select relevant columns
+  select(ca_name, y, GPs_Count)
+
+# Display the first few rows of the transformed dataset
+head(df_GPnum)
+# Optionally, visualize missing data (uncomment if required)
+# missmap(df_GPnum)
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Data 1: Monthly data on load by hour of the day for each day of week
+This code processes and integrates monthly data on load by hour of the day for each day of the week, 
+filtering and transforming the data, filling in missing cumulative hours, 
+and merging with additional datasets for comprehensive analysis.
+```{r}
+# Set working directory to the specified path
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code")
+
+# Load the monthly load data from CSV
+data1 <- read.csv("opendata_monthly_ae_when_202404.csv")
+
+# Select relevant columns and simplify data
+mae <- data1[, -c(1, 3)]
+
+# Rename columns for consistency and clarity
+colnames(mae) <- c("month", "hb", "hosp_code", "type", "day", "we", "hour", "inout", "total")
+# Simplify 'type' column values
+mae$type[mae$type == "Emergency Department"] <- "AE"
+mae$type[mae$type != "AE"] <- "MIU"
+
+# Filter out rows with type "MIU"
+mae <- mae %>%
+  filter(type != "MIU") %>%
+  # Merge with hospital and council area codes
+  left_join(df_hosp.ca, by = c("hosp_code", "hb")) %>%
+  # Merge with classified council area sizes
+  left_join(ca_classed[, c("ca_name", "size", "size_type")], by = c("ca_name"))
+
+# Create a new column 'h' for hour of day
+uh <- unique(mae$hour)
+mae$h <- mae$total * 0 - 1
+for (i in 1:length(uh)) mae$h[mae$hour == uh[i]] <- i - 1
+# Create new columns for month and year
+mae$m <- mae$month %% 100
+mae$y <- mae$month %/% 100
+
+# Create a new column 'dow' for day of week
+ud <- unique(mae$day)
+id <- c(5, 1, 6, 7, 4, 2, 3)
+mae$dow <- mae$y
+for (i in 1:7) mae$dow[mae$day == ud[i]] <- id[i]
+# Create a new column 'cm' for cumulative month
+mae$cm <- (mae$y - 2018) * 12 + mae$m
+# Create a new column 'ch' for cumulative hour of week
+mae$ch <- (mae$dow - 1) * 24 + mae$h
+
+# Select relevant columns for further processing
+mae <- mae %>%
+  select(hosp_code, ca, ca_name, hb, hb_name, y, m, h, dow, cm, ch, total)
+
+# Display the first few rows of the transformed dataset
+head(mae)
+# Optionally, visualize missing data (uncomment if required)
+# missmap(mae)
+```
+
+
+Merge into Council Area Level
+```{r}
+mae_ca <- mae %>%
+  # Group by council area, health board, year, month, cumulative month, and cumulative hour
+  group_by(ca, ca_name, hb, hb_name, y, m, cm, ch) %>%
+  # Summarize total load
+  summarize(
+    total = sum(total)
+  )
+
+# Display the first few rows of the summarized dataset
+head(mae_ca)
+# Optionally, visualize missing data (uncomment if required)
+# missmap(mae_ca)
+```
+
+
+Fill missing cumulative hours (ch)
+```{r}
+# Assume the original dataframe is df_monthly_load_draft
+df <- mae_ca
+
+# Create a complete sequence of all possible cumulative hours (ch)
+ch_full <- data.frame(ch = 0:167)
+
+# Get unique combinations of council area and related attributes
+unique_combinations <- df %>%
+  select(ca, ca_name, hb, hb_name, y, m, cm) %>%
+  distinct()
+
+# Generate a complete ch sequence for each unique combination
+expanded_df <- unique_combinations %>%
+  crossing(ch_full)
+
+# Merge the original data with the expanded dataframe
+merged_df <- expanded_df %>%
+  left_join(df, by = c("ca", "ca_name", "hb", "hb_name", "y", "m", "cm", "ch"))
+
+# Fill missing rows with total set to 0
+df_monthly_load_draft <- merged_df %>%
+  mutate(total = ifelse(is.na(total), 0, total))
+```
+
+
+Integrate all required data
+```{r}
+df_monthly_load <- df_monthly_load_draft %>%
+  # Remove rows where year is 2024
+  filter(y != 2024) %>%
+  # Merge with classified council area sizes
+  left_join(select(ca_classed, -size), by = c("ca_name", "hb", "hb_name")) %>%
+  # Merge with GP headcount data
+  left_join(df_GPnum, by = c("ca_name", "y")) %>%
+  # Merge with practice list sizes data
+  left_join(list.sizes_ca, by = c("ca_name", "y"))
+# Optionally, merge with demographic data (uncomment if required)
+# left_join(df_demo_imputed, by = c("ca_name", "y"))
+
+# Display the first few rows of the final integrated dataset
+head(df_monthly_load)
+# Optionally, visualize missing data (uncomment if required)
+# missmap(df_monthly_load)
+
+# # Find rows with missing values
+# rows_with_na <- df_monthly_load[rowSums(is.na(df_monthly_load)) > 0, ]
+# # Print these rows
+# print(rows_with_na)
+
+# Export the final dataset to a CSV file
+write.csv(df_monthly_load, "df_monthly_load.csv", row.names = FALSE)
+```
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Data 2: Weekly data on numbers by length of wait
+This code processes weekly data on patient wait times, 
+performing data transformations and merging with additional datasets to create a comprehensive dataframe for analysis.
+```{r}
+# Set working directory to the specified path
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code")
+
+# Load the weekly data on numbers by length of wait from CSV
+data2 <- read.csv("Weekly_data_on_numbers_by_length_of_wait_20240609.csv")
+
+# Select relevant columns and simplify data
+wlw <- data2[, -c(1, 3)]
+colnames(wlw) <- c(
+  "date", "hb", "hosp_code", "depart",
+  "total.a", "lt4", "gt4", "pc.lt4", "gt8", "pc.gt8", "gt12", "pc.gt12"
+)
+
+# Merge with hospital and council area codes
+wlw <- wlw %>%
+  left_join(df_hosp.ca, by = c("hosp_code", "hb")) %>%
+  left_join(ca_classed[, c("ca_name", "size", "size_type")], by = c("ca_name"))
+
+# Calculate additional wait time metrics
+wlw$g4l8 <- wlw$gt4 - wlw$gt8
+wlw$g8l12 <- wlw$gt8 - wlw$gt12
+
+# Calculate percentages and round them
+wlw$pc.gt4 <- wlw$gt4 / wlw$total.a * 100
+wlw$pc.g4l8 <- wlw$g4l8 / wlw$total.a * 100
+wlw$pc.g8l12 <- wlw$g8l12 / wlw$total.a * 100
+wlw <- wlw %>%
+  mutate(
+    pc.gt4 = round(pc.gt4, 1),
+    pc.g4l8 = round(pc.g4l8, 1),
+    pc.g8l12 = round(pc.g8l12, 1)
+  )
+
+# Extract day, month, and year from date
+wlw$d <- wlw$date %% 100
+dm <- wlw$date %/% 100
+wlw$m <- dm %% 100
+wlw$y <- dm %/% 100
+wlw$date <- as.Date(as.character(wlw$date), "%Y%m%d")
+wlw$julian <- julian(wlw$date, origin = as.Date("2015-02-22"))
+
+# Define new column order
+new_order <- c("date", "hb", "hb_name", "ca", "ca_name", "size", "size_type", "hosp_code", "depart", "total.a", "lt4", "gt4", "gt8", "gt12", "g4l8", "g8l12", "pc.lt4", "pc.gt4", "pc.gt8", "pc.gt12", "pc.g4l8", "pc.g8l12", "d", "m", "y", "julian")
+
+# Rearrange columns
+wlw <- wlw %>%
+  select(date, hosp_code, ca, ca_name, hb, hb_name, y, m, d, julian, total.a, lt4, gt4, pc.lt4, pc.gt4)
+
+# Display the first few rows of the transformed dataset
+head(wlw)
+# Optionally, visualize missing data (uncomment if required)
+# missmap(wlw)
+```
+
+
+Merge into Council Area Level
+```{r}
+# Create the wlw_ca dataframe
+wlw_ca <- wlw %>%
+  # Group by council area, health board, year, month, and Julian date
+  group_by(date, ca, ca_name, hb, hb_name, y, m, julian) %>%
+  # Summarize total attendance and wait times
+  summarize(
+    total.a = sum(total.a),
+    lt4 = sum(lt4),
+    gt4 = sum(gt4)
+  )
+
+# Calculate percentages
+wlw_ca <- wlw_ca %>%
+  mutate(
+    pc.lt4 = lt4 / total.a,
+    pc.gt4 = gt4 / total.a
+  )
+
+# Inspect the head of the updated dataframe
+head(wlw_ca)
+# Optionally, visualize missing data (uncomment if required)
+# missmap(wlw_ca)
+```
+
+
+Integrate all required data
+```{r}
+# Merge with classified council area sizes, GP headcount, and practice list sizes data
+df_waiting_time <- wlw_ca %>%
+  # Delete date column
+  select(-date) %>%
+  # Filter out rows where year is 2024
+  filter(y != 2024) %>%
+  left_join(select(ca_classed, -size), by = c("ca_name", "hb", "hb_name")) %>%
+  left_join(df_GPnum, by = c("ca_name", "y")) %>%
+  left_join(list.sizes_ca, by = c("ca_name", "y"))
+# Optionally, merge with demographic data (uncomment if required)
+# left_join(df_demo_imputed, by = c("ca_name", "y"))
+
+# Display the first few rows of the final integrated dataset
+head(df_waiting_time)
+# Optionally, visualize missing data (uncomment if required)
+# missmap(df_waiting_time)
+
+# Export the final dataset to a CSV file
+write.csv(df_waiting_time, "df_waiting_time.csv", row.names = FALSE)
+```
+
+In data5_CA.csv:
+
+Glasgow City corresponds to CA Code S12000046.
+In dz2011_codes_and_labels_21042020.csv:
+
+Glasgow City is represented by CA Code S12000049.
+In data5_CA.csv:
+
+North Lanarkshire corresponds to CA Code S12000044.
+In dz2011_codes_and_labels_21042020.csv:
+
+North Lanarkshire is represented by CA Code S12000050.
+For Fife in dz2011_codes_and_labels_21042020.csv:
+
+From 2015-2017, Fife has CA Code S12000015.
+From other times, Fife has CA Code S12000047.
+For Perth and Kinross in dz2011_codes_and_labels_21042020.csv:
+
+From 2018-2024, Perth and Kinross has CA Code S12000048.
+From other times, Perth and Kinross has CA Code S12000024.
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Module: Data Preparation for 2024 Analysis
+#——————————————————————————————————————————————————————————————————————————————#
+
+This module prepares the data for the analysis of the situation in 2024 by assuming that the number of GPs and the practice list sizes in each CA remain the same as in 2023. The 2023 data is duplicated and modified for 2024.
+```{r}
+# Assuming the number of GPs in each CA in 2024 is the same as in 2023
+# Use 2023 data to supplement the GP count data for 2024
+df_GPnum_imputed <- df_GPnum %>%
+  filter(y == 2023) %>% # Filter out the data for 2023
+  mutate(y = 2024) # Change the year to 2024
+
+df_GPnum_2024 <- bind_rows(df_GPnum, df_GPnum_imputed)
+
+# Assuming the practice list sizes in each CA in 2024 are the same as in 2023
+# Use 2023 data to supplement the practice list sizes data for 2024
+list.sizes_ca_imputed <- list.sizes_ca %>%
+  filter(y == 2023) %>% # Filter out the data for 2023
+  mutate(y = 2024) # Change the year to 2024
+
+# Add the 2024 data to the original data frame
+list.sizes_ca_2024 <- bind_rows(list.sizes_ca, list.sizes_ca_imputed)
+```
+
+
+Module: Integrate and Export All Data Including Filled 2024 Data
+This module integrates all data, including the imputed data for 2024, 
+and prepares it for further modeling and analysis in Integrative_analysis_final.Rmd. 
+The integrated data is then extracted and exported.
+```{r}
+library(dplyr)
+
+# Merge the monthly load data with the classified council area sizes, GP headcount data, and practice list sizes data
+df_monthly_load_2024 <- df_monthly_load_draft %>%
+  left_join(select(ca_classed, -size), by = c("ca_name", "hb", "hb_name")) %>%
+  left_join(df_GPnum_2024, by = c("ca_name", "y")) %>%
+  left_join(list.sizes_ca_2024, by = c("ca_name", "y"))
+
+# Calculate the months and cumulative months from May 2024 to December 2024
+future_months <- data.frame(
+  y = rep(2024, 8),
+  m = 5:12,
+  cm = seq(77, 84), # Assuming cm starts at 1 and increments
+  stringsAsFactors = FALSE
+)
+
+# Extract unique ca, ca_name, hb, hb_name
+unique_ca <- unique(df_monthly_load_2024[, c("ca", "ca_name", "hb", "hb_name")])
+
+# Generate data for each ca from May 2024 to December 2024
+future_data <- unique_ca %>%
+  crossing(future_months)
+
+# Duplicate each row 167 times
+future_data <- future_data %>%
+  slice(rep(1:n(), each = 168))
+
+# Generate a repeating sequence from 0 to 167 and add it to the dataset
+future_data <- future_data %>%
+  group_by(ca, m) %>%
+  mutate(ch = rep(seq(0, 167, length.out = 168), times = 1)) %>%
+  ungroup()
+
+# Add a total column and set it to NA
+future_data$total <- NA
+
+# Merge future data with existing columns
+future_data <- future_data %>%
+  left_join(df_monthly_load_2024[, c("ca", "ca_name", "hb", "hb_name", "y", "size_type", "GPs_Count", "num.practices", "list.size")]) %>%
+  distinct()
+
+# Append future data to the existing dataframe
+df_monthly_load_predict <- bind_rows(df_monthly_load_2024, future_data)
+
+# Export the new dataframe to a CSV file
+write.csv(df_monthly_load_predict, "df_monthly_load_predict.csv", row.names = FALSE)
+
+# Visualize missing values in the dataframe
+missmap(df_monthly_load_predict)
+```
+
+
+Module: Integrate and Export Waiting Time Data Including Filled 2024 Data
+This module integrates waiting time data, including imputed data for 2024, and prepares it for further analysis. 
+The integrated data is then extracted and exported.
+```{r}
+library(dplyr)
+library(lubridate)
+
+# Merge the waiting time data with classified council area sizes, GP headcount data, and practice list sizes data
+df_waiting_time_2024 <- wlw_ca %>%
+  left_join(select(ca_classed, -size), by = c("ca_name", "hb", "hb_name")) %>%
+  left_join(df_GPnum_2024, by = c("ca_name", "y")) %>%
+  left_join(list.sizes_ca_2024, by = c("ca_name", "y")) %>%
+  select(-total.a)
+
+# Define the start and end dates
+start_date <- as.Date("2015-02-22")
+end_date <- as.Date("2024-12-31")
+num_weeks <- as.integer((end_date - start_date) / 7)
+final_date <- start_date + 7 * num_weeks
+
+# Ensure the date column in df_waiting_time_2024 is of Date type
+df_waiting_time_2024$date <- as.Date(df_waiting_time_2024$date)
+
+# Define the last and target dates
+last_date <- as.Date("2024-06-09")
+target_date <- as.Date("2024-12-29")
+
+# Calculate the number of weeks to add (7 days per unit)
+num_weeks_to_add <- as.integer(difftime(target_date, last_date, units = "weeks"))
+
+# Extract unique ca, ca_name, hb, hb_name
+unique_ca <- unique(df_waiting_time_2024[, c("ca", "ca_name", "hb", "hb_name")])
+
+# Generate corresponding dates and other variables for each ca
+future_data <- unique_ca %>%
+  rowwise() %>%
+  do({
+    ca_data <- .
+    dates <- seq(last_date + 7, by = "7 days", length.out = num_weeks_to_add)
+    tibble(
+      date = dates,
+      ca = ca_data$ca,
+      ca_name = ca_data$ca_name,
+      hb = ca_data$hb,
+      hb_name = ca_data$hb_name,
+      y = year(dates),
+      m = month(dates),
+      julian = seq(max(df_waiting_time_2024$julian) + 7, by = 7, length.out = num_weeks_to_add),
+      lt4 = NA,
+      gt4 = NA
+    )
+  }) %>%
+  ungroup()
+
+# Extract size_type, GPs_Count, num.practices, and list.size
+ca_year_info <- unique(df_waiting_time_2024[, c("ca", "y", "size_type", "GPs_Count", "num.practices", "list.size")])
+
+# Add size_type, GPs_Count, num.practices, and list.size to future_data
+future_data <- future_data %>%
+  left_join(ca_year_info, by = c("ca", "y"))
+
+# Append future data to the existing dataframe
+df_waiting_time_predict <- bind_rows(df_waiting_time_2024, future_data)
+
+# Export the new dataframe to a CSV file
+write.csv(df_waiting_time_predict, "df_waiting_time_predict.csv", row.names = FALSE)
+
+# Visualize missing values in the dataframe
+missmap(df_waiting_time_predict)
+```
+
+
+
+
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Draft: part of the auxiliary analysis, but not included in the final model.
+#——————————————————————————————————————————————————————————————————————————————#
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Data 8: Discharge data
+Data preprocessing and transformation for discharge data analysis
+```{r}
+# Set the working directory and read the CSV file
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code")
+data8 <- read.csv("Discharge_data.csv")
+
+# Subset the data to exclude unnecessary columns
+discharge <- data8[, -c(1, 3, 8, 10)]
+
+# Simplify and process data & variables
+colnames(discharge) <- c("month", "hb", "hosp_code", "type", "age", "reason", "number.a")
+discharge$type[discharge$type == "Emergency Department"] <- "AE" # Rename "Emergency Department" to "AE"
+discharge$type[discharge$type != "AE"] <- "MIU" # Rename "Minor Injury Unit or Other" to "MIU"
+
+# Impute missing values and further process variables
+discharge_imputed <- discharge %>%
+  filter(type == "AE") %>% # Remove departments that are not A&E
+  mutate(
+    age = ifelse(age == "", "unknown", age), # Handle missing age values
+    reason = ifelse(reason == "", "unknown", reason), # Handle missing discharge reason values
+    y = month %/% 100, # Extract year
+    m = month %% 100, # Extract day of month
+    cm = (y - 2018) * 12 + m # Calculate cumulative months since 201801
+  )
+
+# Perform a left join with df_hosp.ca and select relevant columns
+discharge_imputed <- discharge_imputed %>%
+  left_join(df_hosp.ca, by = c("hosp_code", "hb")) %>%
+  select("hosp_code", "ca", "ca_name", "hb", "hb_name", "y", "m", "cm", "age", "reason", "number.a")
+
+# Group by certain variables and summarize the number of cases
+discharge_ca <- discharge_imputed %>%
+  group_by(ca, ca_name, hb, hb_name, y, m, cm, age, reason) %>%
+  summarize(
+    number.a = sum(number.a)
+  )
+```
+
+
+Observing patients' age distribution across Scotland
+```{r}
+# Calculate the proportion of each age group in total numbers
+age_totals <- discharge_ca %>%
+  group_by(age) %>%
+  summarise(total = sum(number.a))
+
+# Calculate proportions and averages per age group
+age_proportions <- age_totals %>%
+  mutate(
+    proportion = total / sum(total),
+    total.ave = case_when(
+      age == "Under 18" ~ total / 18,
+      age == "18-24" ~ total / 7,
+      age == "25-39" ~ total / 15,
+      age == "40-64" ~ total / 25,
+      age == "65-74" ~ total / 10,
+      age == "75 plus" ~ total / 15,
+      age == "unknown" ~ total
+    ),
+    proportion.ave = total.ave / sum(total.ave)
+  )
+
+# # Plot a pie chart with proportions labeled
+ggplot(age_proportions, aes(x = "", y = proportion, fill = age)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  geom_text(aes(label = scales::percent(proportion)),
+    position = position_stack(vjust = 0.5)
+  ) +
+  labs(
+    title = "Proportion of Numbers by Age Group",
+    x = NULL, y = NULL
+  ) +
+  scale_y_continuous(labels = percent) +
+  theme_void() +
+  scale_fill_brewer(palette = "Set3")
+```
+
+
+Observing patients' age distribution by CA (region) after grouping
+```{r}
+# Calculate proportions of each age group within each CA
+ca_age_proportions <- discharge_ca %>%
+  group_by(ca, age) %>%
+  summarise(total = sum(number.a)) %>%
+  group_by(ca) %>%
+  mutate(
+    proportion = total / sum(total),
+    total.ave = case_when(
+      age == "Under 18" ~ total / 18,
+      age == "18-24" ~ total / 7,
+      age == "25-39" ~ total / 15,
+      age == "40-64" ~ total / 25,
+      age == "65-74" ~ total / 10,
+      age == "75 plus" ~ total / 15,
+      age == "unknown" ~ total
+    ),
+    proportion.ave = total.ave / sum(total.ave)
+  )
+
+# Plot proportion pie charts for each CA region
+ca_unique <- unique(ca_age_proportions$ca)
+
+for (c in ca_unique) {
+  ca_data <- ca_age_proportions %>% filter(ca == c)
+
+  ggplot(ca_data, aes(x = "", y = proportion.ave, fill = age)) +
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar("y", start = 0) +
+    geom_text(aes(label = scales::percent(proportion.ave)),
+      position = position_stack(vjust = 0.5)
+    ) +
+    labs(
+      title = "Age Proportions",
+      x = NULL, y = NULL
+    ) +
+    theme_void() +
+    scale_fill_brewer(palette = "Set3")
+
+  ggplot(ca_data, aes(x = "", y = proportion, fill = age)) +
+    geom_bar(stat = "identity", width = 1) +
+    coord_polar("y", start = 0) +
+    geom_text(aes(label = scales::percent(proportion)),
+      position = position_stack(vjust = 0.5)
+    ) +
+    labs(
+      title = paste("Proportion of Numbers by Age Group in", c),
+      x = NULL, y = NULL
+    ) +
+    scale_y_continuous(labels = percent) +
+    theme_void()
+
+  print(last_plot())
+}
+```
+It can be observed that after averaging the proportion of lengths by age group, 
+there is a significant difference in the number of patients of each age in the different CAs, 
+so we so we considered age as one of the variables affecting the effect of the model.
+
+
+
+
+#——————————————————————————————————————————————————————————————————————————————#
+Data 3: Population Estimates Time Series Data
+Demographic data processing for Community Areas (CA)
+This code reads demographic data specific to CA from a CSV file, computes age group distributions,
+and organizes the data into a structured format for analysis.
+```{r}
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code")
+data5 <- read.csv("data5_CA.csv")
+
+# Geographic: Grouped by CA (Community Area)
+
+# Gender: Grouped by Males & Females
+
+# Age: Grouped by
+# Infancy: 0-2
+# Early childhood: 3-6
+# Middle childhood: 7-12
+# Adolescence: 13-20
+# Early adulthood: 21-40
+# Middle adulthood: 41-65
+# Late adulthood: > 65
+# Reference: Sigelman, C. K., De George, L., Cunial, K., & Rider, E. A. (2018). Life span human development. Cengage AU.
+
+# Set the working directory and read the data file
+setwd("/Users/l/Desktop/Edinburgh/Dissertation/Session1_PHS/Data_Code")
+data5 <- read.csv("data5_CA.csv")
+
+# Define age groups and corresponding age ranges
+age_groups <- c(
+  "Infancy", "Early_childhood", "Middle_childhood", "Adolescence",
+  "Early_adulthood", "Middle_adulthood", "Late_adulthood"
+)
+age_ranges <- list(
+  c(0, 1, 2), c(3, 4, 5, 6), c(7, 8, 9, 10, 11, 12), c(13, 14, 15, 16, 17, 18, 19, 20),
+  c(21:40), c(41:65), c(66:90)
+)
+
+# Initialize a dataframe to store demographic information
+df_demo0 <- data.frame(matrix(NA, nrow = nrow(data5), ncol = length(age_groups) + 5))
+colnames(df_demo0) <- c("ca", "ca_name", "Sex", "y", "Allages", unlist(age_groups))
+
+# Populate the dataframe with CA, CA name, Sex, year, and age group data
+for (i in 1:nrow(data5)) {
+  df_demo0[i, 1:5] <- data5[i, 1:5]
+  for (j in 1:length(age_groups)) {
+    df_demo0[i, 5 + j] <- sum(data5[i, age_ranges[[j]] + 6])
+  }
+}
+
+# Clean and organize demographic data: filter out Scotland-wide data and aggregate by CA and year
+df_demo <- df_demo0 %>%
+  filter(ca_name != "Scotland", Sex != "Persons") %>%
+  mutate(
+    "Male.Infancy" = ifelse(Sex == "Males", Infancy, NA),
+    "Male.Early_childhood" = ifelse(Sex == "Males", Early_childhood, NA),
+    "Male.Middle_childhood" = ifelse(Sex == "Males", Middle_childhood, NA),
+    "Male.Adolescence" = ifelse(Sex == "Males", Adolescence, NA),
+    "Male.Early_adulthood" = ifelse(Sex == "Males", Early_adulthood, NA),
+    "Male.Middle_adulthood" = ifelse(Sex == "Males", Middle_adulthood, NA),
+    "Male.Late_adulthood" = ifelse(Sex == "Males", Late_adulthood, NA),
+    "Female.Infancy" = ifelse(Sex == "Females", Infancy, NA),
+    "Female.Early_childhood" = ifelse(Sex == "Females", Early_childhood, NA),
+    "Female.Middle_childhood" = ifelse(Sex == "Females", Middle_childhood, NA),
+    "Female.Adolescence" = ifelse(Sex == "Females", Adolescence, NA),
+    "Female.Early_adulthood" = ifelse(Sex == "Females", Early_adulthood, NA),
+    "Female.Middle_adulthood" = ifelse(Sex == "Females", Middle_adulthood, NA),
+    "Female.Late_adulthood" = ifelse(Sex == "Females", Late_adulthood, NA)
+  ) %>%
+  select(-Allages, -Sex, -Infancy, -Early_childhood, -Middle_childhood, -Adolescence, -Early_adulthood, -Middle_adulthood, -Late_adulthood)
+
+# Aggregate demographic data by CA name and year, keeping the first non-NA value for each demographic variable
+df_demo <- df_demo %>%
+  group_by(ca_name, y) %>%
+  summarize_at(vars(Male.Infancy, Male.Early_childhood, Male.Middle_childhood, Male.Adolescence, Male.Early_adulthood, Male.Middle_adulthood, Male.Late_adulthood, Female.Infancy, Female.Early_childhood, Female.Middle_childhood, Female.Adolescence, Female.Early_adulthood, Female.Middle_adulthood, Female.Late_adulthood), ~ first(na.omit(.)))
+
+# Display the first few rows of the processed demographic data
+head(df_demo)
+# missmap(df_demo)  # Uncomment to visualize missing data patterns if 'mice' package is installed
+```
+
+
+Data Check: Ensure no missing data from 2022 to 2024; impute if necessary
+Explore trends for a specific CA (Community Area)
+```{r}
+# Filter the dataframe to retain data only for CA "Aberdeen City"
+filtered_df <- df_demo %>% filter(ca_name == "Aberdeen City")
+
+# Retrieve all age-sex group column names
+age.sex_groups <- c(
+  "Male.Infancy", "Male.Early_childhood", "Male.Middle_childhood",
+  "Male.Adolescence", "Male.Early_adulthood", "Male.Middle_adulthood",
+  "Male.Late_adulthood", "Female.Infancy", "Female.Early_childhood",
+  "Female.Middle_childhood", "Female.Adolescence", "Female.Early_adulthood",
+  "Female.Middle_adulthood", "Female.Late_adulthood"
+)
+
+# Plot line charts for each age-sex group individually
+for (age.sex_group in age.sex_groups) {
+  p <- ggplot(filtered_df, aes_string(x = "y", y = age.sex_group)) +
+    geom_line(color = "blue") +
+    labs(
+      title = paste("Trend of", age.sex_group, "over Years"),
+      x = "Year",
+      y = "Count"
+    ) +
+    theme_minimal()
+
+  # Print the plot
+  print(p)
+}
+
+# Convert data from wide to long format
+df_long <- df_demo %>%
+  pivot_longer(
+    cols = c(
+      "Male.Infancy", "Male.Early_childhood", "Male.Middle_childhood",
+      "Male.Adolescence", "Male.Early_adulthood", "Male.Middle_adulthood",
+      "Male.Late_adulthood", "Female.Infancy", "Female.Early_childhood",
+      "Female.Middle_childhood", "Female.Adolescence", "Female.Early_adulthood",
+      "Female.Middle_adulthood", "Female.Late_adulthood"
+    ),
+    names_to = "Age_Group", values_to = "Count"
+  ) %>%
+  filter(ca_name == "City of Edinburgh")
+
+# Plot the line chart for age groups over years in long format
+ggplot(df_long, aes(x = y, y = Count, color = Age_Group)) +
+  geom_line() +
+  labs(
+    title = "Trend of Age Groups over Years",
+    x = "Year",
+    y = "Count",
+    color = "Age Group"
+  ) +
+  theme_minimal()
+```
+
+
+According to the graph it is found that the pattern of change is linear, 
+so that we use GAM models to fit and impute missing values.
+```{r}
+# Fit GAM models and predict
+interpolated_data_list <- lapply(age.sex_groups, function(var) {
+  # Group by CA and fit GAM model for each age-sex group variable
+  gam_models <- df_demo %>%
+    group_by(ca_name) %>%
+    do(model = {
+      gam_formula <- as.formula(paste(var, "~ s(y, k=3)"))
+      gam(gam_formula, data = .)
+    })
+
+  # Create a sequence of years to predict
+  new_years <- data.frame(y = 2022:2024)
+
+  # Perform predictions
+  predictions <- gam_models %>%
+    do({
+      preds <- predict(.$model, newdata = new_years, type = "response")
+      data.frame(y = new_years$y, ca_name = .$ca_name, response = preds)
+    }) %>%
+    rename(!!var := response)
+
+  return(predictions)
+})
+
+# Combine all predicted results
+interpolated_data <- Reduce(function(x, y) full_join(x, y, by = c("ca_name", "y")), interpolated_data_list)
+
+# Merge predicted results back into the original dataframe
+df_demo_imputed <- bind_rows(df_demo, interpolated_data) %>%
+  arrange(ca_name, y)
+
+# Optionally, round values to integers and set any negative values to zero if needed
+df_demo_imputed <- df_demo_imputed %>%
+  mutate(across(Male.Infancy:Female.Late_adulthood, function(x) pmax(as.integer(x), 0)))
+```
+
+In data5_CA.csv:
+
+Glasgow City corresponds to CA Code S12000046.
+In dz2011_codes_and_labels_21042020.csv:
+
+Glasgow City is represented by CA Code S12000049.
+In data5_CA.csv:
+
+North Lanarkshire corresponds to CA Code S12000044.
+In dz2011_codes_and_labels_21042020.csv:
+
+North Lanarkshire is represented by CA Code S12000050.
+For Fife in dz2011_codes_and_labels_21042020.csv:
+
+From 2015-2017, Fife has CA Code S12000015.
+From other times, Fife has CA Code S12000047.
+For Perth and Kinross in dz2011_codes_and_labels_21042020.csv:
+
+From 2018-2024, Perth and Kinross has CA Code S12000048.
+From other times, Perth and Kinross has CA Code S12000024.
+
+Adjust Community Area (CA) codes in the dataframe
+```{r}
+# Modify the dataframe to adjust the CA column based on specific CA names
+# df_demo_imputed <- df_demo_imputed %>%
+# mutate(ca = if_else(ca_name == "Glasgow City", "S12000049", ca)) %>%  # Update CA code for Glasgow City
+# mutate(ca = if_else(ca_name == "North Lanarkshire", "S12000050", ca))  # Update CA code for North Lanarkshire
+# mutate(ca = if_else(ca_name == "Fife", "S12000047", ca)) %>%  # Update CA code for Fife
+# mutate(ca = if_else(ca_name == "Perth and Kinross", "S12000024", ca))  # Update CA code for Perth and Kinross
+
+# Print the first few rows to inspect the results
+# head(df_demo_imputed)
+# missmap(df_demo_imputed)  # Optionally visualize missing data if needed
+```
